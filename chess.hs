@@ -55,6 +55,11 @@ type Board = [Piece]
 createPieces :: PieceType -> Colour -> [(Int, Int)] -> Board
 createPieces t c xs = map (\l -> (Piece (t, c, l))) xs
 
+-- Get what piece is at a location
+getPieceAt :: Board -> (Int, Int) -> Maybe Piece
+getPieceAt b l = find (isAt l) b
+        where isAt (x,y) p = ((getx p) == x) && ((gety p) == y)
+
 startingBoard = mirrorAll Black $
         (createPieces Rook   White [(0,0),(0,7)]) ++
         (createPieces Knight White [(1,0),(6,0)]) ++
