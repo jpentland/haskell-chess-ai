@@ -48,6 +48,24 @@ getcolour (Piece (_, c, _)) = c
 move :: Piece -> Move -> Piece
 move (Piece (t, c, (x, y))) (Move (dx, dy)) = Piece (t, c, (x + dx, y + dy))
 
+-- A board is just a list of Pieces
+type Board = [Piece]
+
+-- Create the same piece at multiple locations on the board
+createPieces :: PieceType -> Colour -> [(Int, Int)] -> Board
+createPieces t c xs = map (\l -> (Piece (t, c, l))) xs
+
+startingBoard = mirrorAll Black $
+        (createPieces Rook   White [(0,0),(0,7)]) ++
+        (createPieces Knight White [(1,0),(6,0)]) ++
+        (createPieces Bishop White [(2,0),(5,0)]) ++
+        (createPieces Queen  White [(3,0)]) ++
+        (createPieces King   White [(4,0)]) ++
+        (createPieces Pawn   White [(x, 1) | x <- [0..7]])
+        where
+                mirrorAll c b = b ++ map (mirror1 c) b
+                mirror1 c (Piece (t, _, (x, y))) = Piece (t, c, (7-x, 7-y))
+
 -- Generate moves pieces can make
 getmoves :: PieceType -> [Move]
 getmoves Rook   = (extendMove 8) `apply` rotateMove (Move (0, 1))
