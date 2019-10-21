@@ -70,6 +70,23 @@ getColour (Piece (_, c, _)) = c
 move :: Piece -> Move -> Piece
 move (Piece (t, c, (x, y))) (Move (dx, dy)) = Piece (t, c, (x + dx, y + dy))
 
+--Return a unicode symbol for a piece
+getSymbol ::  Piece -> String
+getSymbol p = s
+    where s = case ((getColour p, getType p)) of
+                (White, Rook)   -> "♜"
+                (White, Knight) -> "♞"
+                (White, Bishop) -> "♝"
+                (White, King)   -> "♛"
+                (White, Queen)  -> "♚"
+                (White, Pawn)   -> "♟"
+                (Black, Rook)   -> "♖"
+                (Black, Knight) -> "♘"
+                (Black, Bishop) -> "♗"
+                (Black, King)   -> "♕"
+                (Black, Queen)  -> "♔"
+                (Black, Pawn)   -> "♙"
+
 -- A board is just a list of Pieces
 type Board = [Piece]
 
@@ -81,6 +98,11 @@ createPieces t c ss = map (\s -> (Piece (t, c, s))) ss
 getPieceAt :: Board -> Square -> Maybe Piece
 getPieceAt b s = find (isAt s) b
         where isAt s p = s == (getsq p)
+
+-- Get what enemy is at a location (returns nothing if empty or friendly piece)
+getEnemyAt :: Board -> Square -> Colour -> Maybe Piece
+getEnemyAt b s c = do p <- getPieceAt b s
+                      if (getColour p == c) then Nothing else (Just p)
 
 -- Is the square empty
 isEmpty :: Board -> Square -> Bool
@@ -151,12 +173,11 @@ getPath p (Move (dx, dy)) = zip (extend n xs) (extend n ys)
 
 -- Return all moves a piece could make on a board
 getMoves :: Board -> Piece -> [Move]
-getMoves b p = filter (canMove b p) $ (rawMoves p) ++ pawnAttack
+getMoves b p = pawnExtra ++ (filter (canMove b p) $ (rawMoves p))
     where
-          pawnAttack = filter ((\m -> enemyAtSq m /= Nothing)) attackMove
-          enemyAtSq m = do p' <- getPieceAt b $ getsq $ move p m
-                           if (getColour p' /= getColour p) then return Nothing else return (Just p')
-          attackMove
+        pawnExtra = filter pawnAttack attackMove
+        pawnAttack m = let p' = move p m in (getEnemyAt b (getsq p') (getColour p')) /= Nothing
+        attackMove
             | getType p == Pawn && getColour p == White = [(Move (1,1)), (Move (-1,1))]
             | getType p == Pawn && getColour p == Black = [(Move (1,-1)), (Move (-1,-1))]
             | otherwise = []
@@ -198,8 +219,8 @@ score c b = foldr (+) 0 $ map (pieceScore c) b
         pieceTypeScore Pawn     = 1
 
 -- Apply a move to a board
-applyMove :: Piece -> Move -> Board -> Board
-applyMove p m b = (move p m) : (filter (\p' -> p /= p' && (not (killedByMove p m p'))) b)
+applyMove :: Board -> (Piece, Move) -> Board
+applyMove b (p, m) = (move p m) : (filter (\p' -> p /= p' && (not (killedByMove p m p'))) b)
 
 -- True if piece is killed by another piece applying a move
 -- TODO: En passant
@@ -211,14 +232,44 @@ showPlayerMoves :: Colour -> Board -> String
 showPlayerMoves c b = concatMap (\(p, m) -> (show p) ++ ": " ++ (show m) ++ "\n") $ getPlayerMoves c b
 
 board :: String
-board = (take (8*6+2) $ cycle "_") ++ drawSquares ++ "\n" ++ (take (8*6+2) $ cycle "-")
-        where drawSquares = concatMap drawLine $ take (8*3) $ cycle [Black, Black, Black, White, White, White]
-              drawLine White = "\n|" ++ (concat $ take 8 $ cycle ["######","      "]) ++ "|"
-              drawLine Black = "\n|" ++ (concat $ take 8 $ cycle ["      ","######"]) ++ "|"
+board = (take (8*3+2) $ cycle "_") ++ drawSquares ++ "\n" ++ (take (8*3+2) $ cycle "-")
+        where drawSquares = concatMap drawLine $ take (8) $ cycle [Black, White]
+              drawLine White = "\n|" ++ (concat $ take 8 $ cycle ["███","   "]) ++ "|"
+              drawLine Black = "\n|" ++ (concat $ take 8 $ cycle ["   ","███"]) ++ "|"
+
+addPiece :: Piece -> String -> String
+addPiece p b = let (x,_:xs) = splitAt (((8 * 3 + 3) * (8 - (gety p))) + 2 + (getx p) * 3) b in
+                x ++ (getSymbol p) ++ xs
+
+renderBoard :: Board -> String
+renderBoard = foldr addPiece board
+
+possibleMoves c b = concatMap (\(p, ms) -> map (\m -> (p, m)) ms) $ getPlayerMoves c b
+scoreAfterMove c b m = score c $ applyMove b m
+
+aiMove :: Int -> Colour -> Board -> (Int, (Piece, Move))
+aiMove 0 c b = foldr (\m' (s, m) ->
+    let s' = scoreAfterMove c b m' in
+    if s > s'
+       then (s, m)
+       else (s',m')
+    ) (-1000, undefined) (possibleMoves c b)
+aiMove n c b = let scoreMoves = map (\m -> aiMove (n-1) (flipColour c) $ applyMove b m) (possibleMoves c b) in
+                   foldr (\(s, m) (s', m') -> if s > s' then (s, m) else (s', m')) (-1000, undefined) scoreMoves
+
+--aiMove :: Int -> Board -> Colour -> (Piece, Move)
+--aiMove 0 b c = snd $ foldr (\m' (s, m) ->
+--    let s' = scoreAfterMove c b m' in
+--    if s > s'
+--       then (s, m)
+--       else (s',m')
+--    ) (-1000, undefined) (possibleMoves c b)
+--aiMove 1 b c = undefined
 
 -- Let players interact with game
 -- TODO: Check for errors etc
 boardLoop c b = do
+        putStrLn $ renderBoard b
         putStrLn $ "Score: " ++ (show (score c b))
         let moves = getPlayerMoves c b
         let ps = map (\(p, _) -> p) moves
@@ -229,7 +280,9 @@ boardLoop c b = do
         putStrLn $ unlines $ zipWith renderLine [0..] ms
         num <- getLine
         let m = ms !! (read num)
-        let nextColour = if c == White then Black else White
-        boardLoop nextColour $ applyMove p m b
+        let b' = applyMove b (p, m)
+        boardLoop White $ applyMove b' $ snd $ aiMove 2 Black b'
+--        let nextColour = if c == White then Black else White
+--        boardLoop nextColour $ applyMove b (p, m)
 
 main = boardLoop White startingBoard
