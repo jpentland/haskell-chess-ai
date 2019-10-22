@@ -1,5 +1,8 @@
 import Data.List
 import Control.Parallel.Strategies (rseq, parMap)
+import System.Random
+
+newRand = randomIO :: IO Int
 
 -- Square specifies a square on the board
 type Square = (Int, Int)
@@ -69,7 +72,10 @@ getColour (Piece (_, c, _)) = c
 
 -- Apply a move to a piece
 move :: Piece -> Move -> Piece
-move (Piece (t, c, (x, y))) (Move (dx, dy)) = Piece (t, c, (x + dx, y + dy))
+move (Piece (t, c, (x, y))) (Move (dx, dy))
+  | (t == Pawn && c == Black && (y+dy) == 0) = Piece (Queen, c, (x + dx, y + dy))
+  | (t == Pawn && c == White && (y+dy) == 7) = Piece (Queen, c, (x + dx, y + dy))
+  | otherwise = Piece (t, c, (x + dx, y + dy))
 
 --Return a unicode symbol for a piece
 getSymbol ::  Piece -> String
@@ -224,9 +230,9 @@ score c b = foldr (+) 0 $ map (pieceScore c) b
           | (getColour p) == c  = pieceTypeScore $ getType p
           | otherwise           = negate $ pieceTypeScore $ getType p
         pieceTypeScore King     = 1000
-        pieceTypeScore Queen    = 10
-        pieceTypeScore Rook     = 6
-        pieceTypeScore Bishop   = 5
+        pieceTypeScore Queen    = 20
+        pieceTypeScore Rook     = 10
+        pieceTypeScore Bishop   = 8
         pieceTypeScore Knight   = 4
         pieceTypeScore Pawn     = 1
 
@@ -259,15 +265,33 @@ renderBoard = foldr addPiece board
 possibleMoves c b = concatMap (\(p, ms) -> map (\m -> (p, m)) ms) $ getPlayerMoves c b
 scoreAfterMove c b m = score c $ applyMove b m
 
-aiMove :: Int -> Colour -> Board -> (Int, (Piece, Move))
-aiMove 0 c b = foldr (\m' (s, m) ->
+-- Select a move based on possible outcomes in the future
+-- rs -> list of random integers to make games more varied
+-- n -> number of moves to look ahead
+-- c -> colour of ai player
+-- c' -> colour to be used when calculating moves (should be same as c, except when being called recursively)
+-- b -> current state of board
+aiMove :: [Int] -> Int -> Colour -> Colour -> Board -> (Int, (Piece, Move))
+aiMove rs 0 c c' b = foldr (\(m', r) (s, m) ->
     let s' = scoreAfterMove c b m' in
-    if s > s'
-       then (s, m)
-       else (s',m')
-    ) (-1000, undefined) (possibleMoves c b)
-aiMove n c b = let scoreMoves = parMap rseq (\m -> (aiMove (n-1) (flipColour c) (applyMove b m), m)) (possibleMoves c b) in
-                   foldr (\((s, _), m) (s', m') -> if s > s' then (s, m) else (s', m')) (-1000, undefined) scoreMoves
+    case (compare s s') of
+       GT -> (s, m)
+       LT -> (s',m')
+       EQ -> case (r `mod` 2) of
+               0 -> (s,m)
+               1 -> (s', m')
+    ) (-1000, undefined) $ zip (possibleMoves c' b) rs
+
+aiMove rs n c c' b = let scoreMoves = parMap rseq (\m -> (aiMove (tail rs) (n-1) c (flipColour c') (applyMove b m), m)) (possibleMoves c' b)
+                         totalScore = foldr (\((s, _), _) t -> s + t) 0 scoreMoves in
+                  (totalScore, snd (foldr (\((s, _), m, r) (s', m') ->
+                      case compare s s' of
+                        GT -> (s, m)
+                        LT -> (s', m')
+                        EQ -> case (r `mod` 2) of
+                                0 -> (s, m)
+                                1 -> (s', m')
+                  ) (-1000, undefined) $ zipWith (\(sm, m) r -> (sm, m, r)) scoreMoves rs))
 
 -- Let players interact with game
 -- TODO: Check for errors etc
@@ -286,7 +310,7 @@ singlePlayer c b = do
         num <- getLine
         let m = ms !! (read num)
         let b' = applyMove b (p, m)
-        singlePlayer White $ applyMove b' $ snd $ aiMove 2 Black b'
+        singlePlayer White $ applyMove b' $ snd $ aiMove (cycle [5,3,8,2,4,1,9,5,6,6]) 2 Black Black b'
 
 twoPlayer c b = do
         putStrLn $ renderBoard b
@@ -305,9 +329,16 @@ twoPlayer c b = do
         let b' = applyMove b (p, m)
         twoPlayer (flipColour c) b'
 
-zeroPlayer c b = do
-        putStrLn $ renderBoard b
-        putStrLn $ (show c) ++ " score: " ++ (show (score c b))
-        zeroPlayer (flipColour c) $ applyMove b $ snd $ aiMove 2 c b
+randomList :: Int -> [Int]
+randomList seed = randoms (mkStdGen seed) :: [Int]
+
+zeroPlayer c b =
+        if (isCheckMate c b) then do
+           putStrLn $ (show c) ++ " lost!"
+        else do
+           putStrLn $ (show c) ++ " score: " ++ (show (score c b))
+           putStrLn $ renderBoard b
+           seed <- newRand
+           zeroPlayer (flipColour c) $ applyMove b $ snd $ aiMove (randomList seed) 2 c c b
 
 main = zeroPlayer White startingBoard
