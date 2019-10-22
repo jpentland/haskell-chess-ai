@@ -1,4 +1,5 @@
 import Data.List
+import Control.Parallel.Strategies (rseq, parMap)
 
 -- Square specifies a square on the board
 type Square = (Int, Int)
@@ -155,11 +156,15 @@ rawMoves p
         | otherwise = stayOnBoard p $ getmoves $ getType p
 
 -- canMove checks whether a raw move can work on a board with pieces
-canMove :: Board -> Piece -> Move -> Bool
-canMove b p m = canKillOrEmpty (getPieceAt b $ head path) && (all (isEmpty b) (tail path))
+-- Includes a maxdepth for checking whether the king is in check (to prevent infinite loops)
+canMove :: Int -> Board -> Piece -> Move -> Bool
+canMove maxdepth b p m = (canKillOrEmpty (getPieceAt b $ head path)) && (all (isEmpty b) (tail path)) && kingWontBeInCheck
         where path = getPath p m
               canKillOrEmpty (Just p') = (getType p) /= Pawn && (getColour p) /= (getColour p')
               canKillOrEmpty Nothing = True
+              kingWontBeInCheck
+                | maxdepth == 0 = False
+                | otherwise     = not $ kingUnderThreat (maxdepth - 1) (getColour p) $ applyMove b (p, m)
 
 -- Return all squares that a piece needs to pass though to make a move, with the final square at the head of the list
 getPath :: Piece -> Move -> [Square]
@@ -172,8 +177,9 @@ getPath p (Move (dx, dy)) = zip (extend n xs) (extend n ys)
               n = if (abs dx) > (abs dy) then (abs dx) else (abs dy)
 
 -- Return all moves a piece could make on a board
-getMoves :: Board -> Piece -> [Move]
-getMoves b p = pawnExtra ++ (filter (canMove b p) $ (rawMoves p))
+-- Includes a maxdepth for checking whether the king is in check (to prevent infinite loops)
+getMoves :: Int -> Board -> Piece -> [Move]
+getMoves maxdepth b p = pawnExtra ++ (filter (canMove maxdepth b p) $ (rawMoves p))
     where
         pawnExtra = filter pawnAttack attackMove
         pawnAttack m = let p' = move p m in (getEnemyAt b (getsq p') (getColour p')) /= Nothing
@@ -183,22 +189,28 @@ getMoves b p = pawnExtra ++ (filter (canMove b p) $ (rawMoves p))
             | otherwise = []
 
 -- Check if p1 could take p2 in the next move
-threat :: Board -> Piece -> Piece -> Bool
-threat b p1 p2 = (getsq p2) `elem` ss
-        where ss = map (getsq . (move p1)) $ getMoves b p1
+-- Includes a maxdepth for checking whether the king is in check (to prevent infinite loops)
+threat :: Int -> Board -> Piece -> Piece -> Bool
+threat maxdepth b p1 p2 = (getsq p2) `elem` ss
+        where ss = map (getsq . (move p1)) $ getMoves maxdepth b p1
 
 -- Check if the king is under threat for a given colour
-kingUnderThreat :: Colour -> Board -> Bool
-kingUnderThreat c b = any (threat b king) (enemies)
-        where king = ((getByColour c) . (getByType King)) b !! 0
+-- Includes a maxdepth for checking whether the king is in check (to prevent infinite loops)
+kingUnderThreat :: Int -> Colour -> Board -> Bool
+kingUnderThreat maxdepth c b = case king of
+                                 Just k -> any (threat maxdepth b k) (enemies)
+                                 Nothing -> True
+        where king = maybeGet (getByColour c $ getByType King b) 0
               enemies = getByColour (flipColour c) b
+
+maybeGet :: [a] -> Int -> Maybe a
+maybeGet  xs i = if (i >= length xs) then Nothing else Just (xs !! i)
 
 -- Return all moves a player could make on a board
 getPlayerMoves :: Colour -> Board -> [(Piece, [Move])]
-getPlayerMoves c b = map (\p -> (p, getMoves b p)) usablePieces
+getPlayerMoves c b = map (\p -> (p, getMoves 1 b p)) playerPieces
     where
             playerPieces = getByColour c b
-            usablePieces = if kingUnderThreat c b then (getByType King playerPieces) else playerPieces
 
 -- Check for a checkmate
 isCheckMate :: Colour -> Board -> Bool
@@ -254,35 +266,48 @@ aiMove 0 c b = foldr (\m' (s, m) ->
        then (s, m)
        else (s',m')
     ) (-1000, undefined) (possibleMoves c b)
-aiMove n c b = let scoreMoves = map (\m -> aiMove (n-1) (flipColour c) $ applyMove b m) (possibleMoves c b) in
-                   foldr (\(s, m) (s', m') -> if s > s' then (s, m) else (s', m')) (-1000, undefined) scoreMoves
-
---aiMove :: Int -> Board -> Colour -> (Piece, Move)
---aiMove 0 b c = snd $ foldr (\m' (s, m) ->
---    let s' = scoreAfterMove c b m' in
---    if s > s'
---       then (s, m)
---       else (s',m')
---    ) (-1000, undefined) (possibleMoves c b)
---aiMove 1 b c = undefined
+aiMove n c b = let scoreMoves = parMap rseq (\m -> (aiMove (n-1) (flipColour c) (applyMove b m), m)) (possibleMoves c b) in
+                   foldr (\((s, _), m) (s', m') -> if s > s' then (s, m) else (s', m')) (-1000, undefined) scoreMoves
 
 -- Let players interact with game
 -- TODO: Check for errors etc
-boardLoop c b = do
+singlePlayer c b = do
         putStrLn $ renderBoard b
         putStrLn $ "Score: " ++ (show (score c b))
-        let moves = getPlayerMoves c b
+        let moves = filter (\(_, m) -> length m > 0) $ getPlayerMoves c b
         let ps = map (\(p, _) -> p) moves
         let renderLine i d = (show i) ++ ": " ++ (show d)
-        putStrLn $ unlines $ zipWith renderLine [0..] moves
+        putStrLn $ unlines $ zipWith renderLine [0..] $ map fst moves
+        putStrLn "Select piece > "
         num <- getLine
         let (p, ms) = moves !! (read num)
         putStrLn $ unlines $ zipWith renderLine [0..] ms
+        putStrLn "Select move > "
         num <- getLine
         let m = ms !! (read num)
         let b' = applyMove b (p, m)
-        boardLoop White $ applyMove b' $ snd $ aiMove 2 Black b'
---        let nextColour = if c == White then Black else White
---        boardLoop nextColour $ applyMove b (p, m)
+        singlePlayer White $ applyMove b' $ snd $ aiMove 2 Black b'
 
-main = boardLoop White startingBoard
+twoPlayer c b = do
+        putStrLn $ renderBoard b
+        putStrLn $ "Score: " ++ (show (score c b))
+        let moves = filter (\(_, m) -> length m > 0) $ getPlayerMoves c b
+        let ps = map (\(p, _) -> p) moves
+        let renderLine i d = (show i) ++ ": " ++ (show d)
+        putStrLn $ unlines $ zipWith renderLine [0..] $ map fst moves
+        putStrLn "Select piece > "
+        num <- getLine
+        let (p, ms) = moves !! (read num)
+        putStrLn $ unlines $ zipWith renderLine [0..] ms
+        putStrLn "Select move > "
+        num <- getLine
+        let m = ms !! (read num)
+        let b' = applyMove b (p, m)
+        twoPlayer (flipColour c) b'
+
+zeroPlayer c b = do
+        putStrLn $ renderBoard b
+        putStrLn $ (show c) ++ " score: " ++ (show (score c b))
+        zeroPlayer (flipColour c) $ applyMove b $ snd $ aiMove 2 c b
+
+main = zeroPlayer White startingBoard
